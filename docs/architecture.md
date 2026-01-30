@@ -1,15 +1,21 @@
-# MVNO Usage Prediction System - Technical Design Document
+# MVNO Usage Prediction System - Architecture Document
 
 **Project:** MVNO Usage Prediction & Pool Optimization  
 **Client:** Culture Wireless Group  
 **Date:** January 30, 2026  
-**Version:** 1.0  
+**Version:** 1.1 (Updated with billing cycle information)
 
 ---
 
-## 1. Executive Summary
+## 📋 Executive Summary
 
-This document outlines the technical architecture, data flow, and implementation strategy for the MVNO Usage Prediction and Pool Optimization System. The system will process Call Detail Records (CDR) and Daily Subscriber Reports (DSR) to predict subscriber usage, optimize pool tier assignments, and calculate safe data donation thresholds.
+This system processes Call Detail Records (CDR) and Daily Subscriber Reports (DSR) to predict subscriber usage, optimize data pool assignments, and calculate safe donation thresholds.
+
+**Billing Cycle Context:**
+- **Invoice Generation:** 21st of each month
+- **Invoice Period:** 21st to 20th (e.g., Jan 21 - Feb 20)
+- **Payment Terms:** 20 days
+- **Invoice Email:** Sent within 5 business days from message-service@sender.zohobooks.com
 
 **Key Deliverables:**
 - Real-time, current month, and next month usage predictions
@@ -19,753 +25,525 @@ This document outlines the technical architecture, data flow, and implementation
 
 ---
 
-## 2. System Architecture
+## 🎯 Visual Data Flow (Simplified for Non-Technical Team)
 
-### 2.1 High-Level Architecture
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                         DATA SOURCES                               │
+│                                                                    │
+│  Every 15 Minutes:              Monthly (End of Billing Cycle):   │
+│  ┌──────────────┐               ┌──────────────────┐             │
+│  │ Daily Usage  │               │  Monthly Usage   │             │
+│  │    Files     │               │  Files (Invoice  │             │
+│  │  (15-min)    │               │  Reconciliation) │             │
+│  └──────────────┘               └──────────────────┘             │
+│         │                                  │                      │
+│         └──────────────┬───────────────────┘                      │
+└────────────────────────┼───────────────────────────────────────────┘
+                         │
+                         │ Secure SFTP Transfer
+                         ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                    OUR SYSTEM (CLOUD)                              │
+│                                                                    │
+│   Step 1: COLLECT                                                 │
+│   ┌────────────────────────────────────────────┐                 │
+│   │  • Download files from carrier             │                 │
+│   │  • Parse Voice, SMS, Data records          │                 │
+│   │  • Store in database                       │                 │
+│   └────────────────────────────────────────────┘                 │
+│                         │                                         │
+│                         ▼                                         │
+│   Step 2: ANALYZE                                                 │
+│   ┌────────────────────────────────────────────┐                 │
+│   │  • Calculate total usage per subscriber    │                 │
+│   │  • Track trends and patterns               │                 │
+│   │  • Identify unusual behavior               │                 │
+│   └────────────────────────────────────────────┘                 │
+│                         │                                         │
+│                         ▼                                         │
+│   Step 3: PREDICT                                                 │
+│   ┌────────────────────────────────────────────┐                 │
+│   │  AI Models predict:                        │                 │
+│   │  • How much data will be used by month-end │                 │
+│   │  • How much will be used next month        │                 │
+│   │  • If customer will go over their limit    │                 │
+│   └────────────────────────────────────────────┘                 │
+│                         │                                         │
+│                         ▼                                         │
+│   Step 4: OPTIMIZE                                                │
+│   ┌────────────────────────────────────────────┐                 │
+│   │  • Assign customers to best data pool      │                 │
+│   │  • Calculate safe donation amounts         │                 │
+│   │  • Minimize costs, prevent overages        │                 │
+│   └────────────────────────────────────────────┘                 │
+│                         │                                         │
+└─────────────────────────┼──────────────────────────────────────────┘
+                          │
+                          │ Real-time API
+                          ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                    CUSTOMER MOBILE APP                             │
+│                                                                    │
+│   Customer sees:                                                  │
+│   ┌────────────────────────────────────────────┐                 │
+│   │  • Current usage this month: 6.2 GB        │                 │
+│   │  • Predicted total: 8.5 GB                 │                 │
+│   │  • Safe to donate: 2.3 GB                  │                 │
+│   │  • Data pool: Tier 2 (10 GB)               │                 │
+│   └────────────────────────────────────────────┘                 │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 📅 Billing Cycle & Data Flow Timeline
+
+### Monthly Cycle Overview
+
+```
+Day 1-20: Active Billing Period
+├─ Every 15 minutes: Daily usage files received
+├─ Every day: Predictions updated
+└─ Real-time: Customer app shows live data
+
+Day 21: Invoice Generation
+├─ Monthly usage file received (for reconciliation)
+├─ Invoice emailed within 5 business days
+└─ New billing cycle begins
+
+Day 21-41: Payment Period (20 days)
+└─ Invoice payment due
+```
+
+### Data File Types
+
+| File Type | Frequency | Purpose | When Used |
+|-----------|-----------|---------|-----------|
+| **Daily Usage Files** | Every 15 minutes | Real-time tracking, predictions | Continuously during billing cycle |
+| **Monthly Usage Files** | End of billing cycle (21st) | Invoice reconciliation | Monthly, for final billing |
+
+**Key Point:** Daily files (every 15 min) are used for predictions and customer app. Monthly files are the official records for invoicing.
+
+---
+
+## 🔄 System Data Flow (Technical)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                     SFTP Server (Every 15 mins)                 │
-│                  CDR Files (Voice/SMS/Data) + DSR Files         │
+│                                                                 │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐     │
+│  │  CDR Files   │  │  DSR Files   │  │  Monthly Files   │     │
+│  │ Voice/SMS/   │  │  (Subscriber │  │  (Billing Cycle  │     │
+│  │    Data      │  │   Snapshots) │  │    Complete)     │     │
+│  └──────────────┘  └──────────────┘  └──────────────────┘     │
 └────────────────────────────┬────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    Data Ingestion Layer                         │
+│                    Data Ingestion Pipeline                      │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
-│  │ SFTP Client  │  │  CDR Parser  │  │  DSR Parser  │         │
+│  │ SFTP Client  │→ │ File Parser  │→ │  Validator   │         │
+│  │              │  │ (CSV → JSON) │  │ (Quality     │         │
+│  │              │  │              │  │  Checks)     │         │
 │  └──────────────┘  └──────────────┘  └──────────────┘         │
 └────────────────────────────┬────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                  PostgreSQL + TimescaleDB                       │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
-│  │   CDR Tables │  │  DSR Tables  │  │  Aggregates  │         │
-│  │ (Hypertables)│  │ (Hypertables)│  │              │         │
-│  └──────────────┘  └──────────────┘  └──────────────┘         │
+│              PostgreSQL Database (TimescaleDB)                  │
+│                                                                 │
+│  Raw Data Storage:                                             │
+│  ┌─────────────────────────────────────────────┐              │
+│  │ • cdr_voice (calls)                         │              │
+│  │ • cdr_sms (text messages)                   │              │
+│  │ • cdr_data (internet usage)                 │              │
+│  │ • daily_subscriber_reports (daily snapshots)│              │
+│  └─────────────────────────────────────────────┘              │
+│                        │                                       │
+│  Aggregated Data:      ▼                                       │
+│  ┌─────────────────────────────────────────────┐              │
+│  │ • usage_daily_agg (daily totals per user)   │              │
+│  │ • usage_monthly_agg (monthly totals)        │              │
+│  └─────────────────────────────────────────────┘              │
 └────────────────────────────┬────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                  Feature Engineering Layer                      │
-│  ┌──────────────────────────────────────────────────┐          │
-│  │  Usage Aggregation | Velocity Calculation        │          │
-│  │  Pattern Detection | Seasonal Features           │          │
-│  └──────────────────────────────────────────────────┘          │
+│                   ML Prediction Engine                          │
+│                                                                 │
+│  ┌──────────────────────────────────────────┐                 │
+│  │  Model 1: Real-Time Predictor            │                 │
+│  │  • Predicts next 15-60 mins              │                 │
+│  │  • Updates every 15 mins                 │                 │
+│  │  • Alerts if approaching limit           │                 │
+│  └──────────────────────────────────────────┘                 │
+│                                                                 │
+│  ┌──────────────────────────────────────────┐                 │
+│  │  Model 2: Current Month Predictor        │                 │
+│  │  • Predicts total usage by month-end     │                 │
+│  │  • Updates daily at 1 AM                 │                 │
+│  │  • Confidence intervals (90%)            │                 │
+│  └──────────────────────────────────────────┘                 │
+│                                                                 │
+│  ┌──────────────────────────────────────────┐                 │
+│  │  Model 3: Next Month Predictor           │                 │
+│  │  • Predicts next billing cycle usage     │                 │
+│  │  • For donation planning                 │                 │
+│  │  • Updated daily at 1:30 AM              │                 │
+│  └──────────────────────────────────────────┘                 │
 └────────────────────────────┬────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                     ML Prediction Models                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
-│  │   Real-Time  │  │ Current Month│  │  Next Month  │         │
-│  │   Predictor  │  │  Predictor   │  │  Predictor   │         │
-│  │  (Prophet)   │  │  (Ensemble)  │  │  (Prophet)   │         │
-│  └──────────────┘  └──────────────┘  └──────────────┘         │
-└──────────┬──────────────────┬──────────────────┬────────────────┘
-           │                  │                  │
-           ▼                  ▼                  ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                  Optimization & Business Logic                  │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
-│  │Pool Optimizer│  │   Donation   │  │     Cost     │         │
-│  │              │  │  Calculator  │  │  Minimizer   │         │
-│  └──────────────┘  └──────────────┘  └──────────────┘         │
+│              Pool Optimization & Donation Engine                │
+│                                                                 │
+│  ┌──────────────────────────────────────────┐                 │
+│  │  Pool Optimizer (Runs Daily at 2 AM)     │                 │
+│  │  • Assigns users to Tier 1/2/3           │                 │
+│  │  • Minimizes costs                       │                 │
+│  │  • Prevents overages                     │                 │
+│  └──────────────────────────────────────────┘                 │
+│                                                                 │
+│  ┌──────────────────────────────────────────┐                 │
+│  │  Donation Calculator (Runs Daily 2:30 AM)│                 │
+│  │  • Calculates safe donation amount       │                 │
+│  │  • Allocated - Predicted - Buffer        │                 │
+│  │  • Updates customer app                  │                 │
+│  └──────────────────────────────────────────┘                 │
 └────────────────────────────┬────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                       FastAPI Layer                             │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
-│  │Usage Endpoint│  │   Prediction │  │   Donation   │         │
-│  │              │  │   Endpoints  │  │   Endpoints  │         │
-│  └──────────────┘  └──────────────┘  └──────────────┘         │
+│                      REST API (FastAPI)                         │
+│                                                                 │
+│  Endpoints for Customer App:                                   │
+│  ┌──────────────────────────────────────────┐                 │
+│  │  GET /usage/{phone}                      │                 │
+│  │  GET /predictions/{phone}/current-month  │                 │
+│  │  GET /donations/{phone}/threshold        │                 │
+│  │  POST /donations                         │                 │
+│  └──────────────────────────────────────────┘                 │
 └────────────────────────────┬────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                   User Profile Dashboard                        │
-│              (Culture Wireless App/Website)                     │
+│                    Customer Mobile App                          │
+│                (Culture Wireless App)                           │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.2 Technology Stack
+---
 
-| Layer | Technology | Justification |
-|-------|-----------|---------------|
-| **Database** | PostgreSQL 14+ with TimescaleDB | Time-series optimization, excellent for CDR data, automatic partitioning |
-| **Backend** | Python 3.9+ | Rich ML ecosystem, rapid development |
-| **API Framework** | FastAPI | High performance, automatic documentation, async support |
-| **ML Libraries** | Prophet, XGBoost, scikit-learn | Proven time-series forecasting, ensemble capabilities |
-| **Data Processing** | Pandas, NumPy | Industry standard for data manipulation |
-| **File Transfer** | Paramiko (SFTP) | Secure file transfer, Python-native |
-| **Deployment** | Azure Functions + Container Apps | Serverless scheduling, scalable API hosting |
+## 💡 How The System Works (Plain English)
+
+### For Customers:
+
+1. **You use your phone** (calls, texts, data)
+2. **Carrier records everything** (every 15 minutes)
+3. **Our system gets the data** (automatically via SFTP)
+4. **AI predicts your usage** (will you go over? how much can you donate?)
+5. **Your app shows you:**
+   - Current usage: "You've used 6.2 GB this month"
+   - Prediction: "You'll likely use 8.5 GB total"
+   - Safe to donate: "You can donate 2.3 GB without risk"
+
+### For Operations Team:
+
+1. **Data arrives every 15 minutes** from the carrier
+2. **System processes automatically:**
+   - Parses files (Voice, SMS, Data)
+   - Stores in database
+   - Calculates daily totals
+3. **Every night:**
+   - AI updates predictions
+   - Pool optimizer reassigns users to best tier
+   - Donation thresholds updated
+4. **Monthly (21st):**
+   - Monthly file received
+   - Used for invoice reconciliation
+   - New billing cycle starts
 
 ---
 
-## 3. Database Design
+## 🗄️ Database Design
 
-### 3.1 Schema Overview
+### Core Tables
 
-**Core Tables:**
-- `subscribers` - Master subscriber information
-- `daily_subscriber_reports` - DSR snapshots (TimescaleDB hypertable, 7-day chunks)
-- `cdr_voice`, `cdr_sms`, `cdr_data` - Call detail records (TimescaleDB hypertables, 1-day chunks)
+**Subscribers Table**
+- Master list of all customers
+- Phone number, IMSI, activation date, current status
+- Which data pool tier they're in
 
-**Aggregation Tables:**
-- `usage_daily_agg` - Pre-aggregated daily usage per subscriber
-- `usage_monthly_agg` - Running monthly totals (automatically updated via trigger)
+**Daily Subscriber Reports (DSR)**
+- Snapshot of each customer every 15 minutes
+- Voice minutes, SMS count, Data bytes
+- Current status (active/suspended)
 
-**Prediction Tables:**
-- `predictions_realtime` - 15-min to 1-hour forecasts
-- `predictions_current_month` - End-of-month predictions (updated daily)
-- `predictions_next_month` - Next billing cycle predictions
+**Call Detail Records (CDR)**
+- Detailed record of every call, text, data session
+- Three separate tables: Voice, SMS, Data
+- Used for granular analysis
 
-**Optimization Tables:**
-- `pool_tiers` - Tier definitions (caps, costs)
-- `pool_assignments` - Historical tier assignments
-- `pool_optimization_log` - Daily optimization results
+**Usage Aggregations**
+- Daily totals per customer (fast queries)
+- Monthly running totals (automatically updated)
 
-**Donation Tables:**
-- `donation_thresholds` - Safe donation amounts (updated daily)
-- `donations` - Actual donation transactions
+**Predictions**
+- Real-time forecasts (15-min, 30-min, 1-hour)
+- Current month predictions (updated daily)
+- Next month predictions
 
-### 3.2 Data Flow
+**Pool Management**
+- Tier definitions (Tier 1: 5GB, Tier 2: 10GB, Tier 3: 20GB)
+- Assignment history (who moved when and why)
+- Optimization logs (cost savings tracked)
 
-```
-Raw CDR/DSR Files → Raw Tables (Hypertables) → Daily Aggregates → Monthly Aggregates
-                                                       ↓
-                                                 ML Features → Predictions → Optimization
-```
-
-### 3.3 Indexing Strategy
-
-**Primary Indexes:**
-- `msisdn` on all subscriber-related tables (user lookups)
-- `usage_date` / `effective_date` on time-series tables (range queries)
-- `bundle_id`, `tier_id` for pool-related queries
-
-**Composite Indexes:**
-- `(usage_date, msisdn)` for efficient time-series + subscriber queries
-- `(billing_month, msisdn)` for monthly aggregations
-
-### 3.4 Data Retention
-
-- **Raw CDR/DSR data:** 90 days (after that, keep only aggregates)
-- **Daily aggregates:** 2 years
-- **Monthly aggregates:** Indefinite
-- **Predictions:** 60 days (historical tracking)
+**Donations**
+- Safe donation thresholds
+- Actual donations made
+- Reward points earned
 
 ---
 
-## 4. ML Model Architecture
+## 📊 Data Processing Schedule
 
-### 4.1 Real-Time Usage Predictor
+### Continuous (Every 15 Minutes)
+- Download new CDR/DSR files from carrier
+- Parse and load into database
+- Update real-time predictions
+- Check for usage alerts
 
-**Purpose:** Predict usage in next 15-60 minutes to prevent immediate overages
+### Daily (Overnight)
 
-**Algorithm:** Facebook Prophet
-- Handles missing data gracefully
-- Captures intra-day patterns
-- Fast inference (<100ms per subscriber)
+| Time | Job | Purpose |
+|------|-----|---------|
+| 12:30 AM | Daily Aggregation | Calculate yesterday's totals |
+| 1:00 AM | Current Month Predictions | Update "how much will you use?" |
+| 1:30 AM | Next Month Predictions | Plan ahead for next cycle |
+| 2:00 AM | Pool Optimization | Move users to best tier |
+| 2:30 AM | Donation Thresholds | Update "safe to donate" amounts |
 
-**Features:**
-- Recent usage velocity (last 1 hour, 3 hours, 6 hours)
-- Time of day
-- Day of week
-- Current session duration
-
-**Update Frequency:** Every 15 minutes (with new CDR data)
-
-**Output:**
-- Predicted data usage (MB) for next 15, 30, 60 minutes
-- 90% confidence interval
-
-### 4.2 Current Month Predictor
-
-**Purpose:** Predict total usage by end of current billing cycle
-
-**Algorithm:** Ensemble (Prophet 60% + XGBoost 40%)
-- Prophet captures seasonality and trends
-- XGBoost learns non-linear patterns and subscriber-specific behaviors
-
-**Features:**
-- Month-to-date usage (voice, SMS, data)
-- Historical monthly usage (last 3 months)
-- Day of month
-- Days remaining in cycle
-- Subscriber characteristics (bundle_id, activation_date)
-- Usage velocity (daily average, weekly trend)
-
-**Update Frequency:** Daily at 1 AM
-
-**Output:**
-- Predicted total data usage (GB) by month-end
-- 90% confidence interval
-- Probability of exceeding current tier cap
-
-### 4.3 Next Month Predictor
-
-**Purpose:** Predict usage for next billing cycle (for donation threshold planning)
-
-**Algorithm:** Prophet with yearly seasonality
-- Captures month-to-month patterns
-- Accounts for subscriber growth/decline trends
-
-**Features:**
-- Historical monthly usage (last 6 months)
-- Trend direction
-- Seasonal components
-- Subscriber tenure
-
-**Update Frequency:** Daily at 1 AM
-
-**Output:**
-- Predicted data usage (GB) for next month
-- 80% confidence interval (wider for longer horizon)
-
-### 4.4 Model Validation Strategy
-
-**Backtesting:**
-- Rolling window validation (30-day train, 7-day test)
-- Walk-forward validation to prevent data leakage
-
-**Metrics:**
-- RMSE (Root Mean Squared Error) - primary metric
-- MAE (Mean Absolute Error)
-- MAPE (Mean Absolute Percentage Error)
-- Coverage (% of actuals within confidence interval)
-
-**Acceptance Criteria:**
-- MAPE < 15% for current month predictions
-- MAPE < 20% for next month predictions
-- 90% coverage for confidence intervals
-
-**Monitoring:**
-- Track prediction error trends in `model_metrics` table
-- Alert if MAPE exceeds thresholds for 3 consecutive days
-- Retrain models monthly with updated data
+### Monthly (21st of Month)
+- Receive monthly usage file from carrier
+- Reconcile with our daily totals
+- Generate invoice data
+- Archive old CDRs (keep aggregates)
 
 ---
 
-## 5. Pool Optimization Logic
+## 🎯 Pool Optimization Strategy
 
-### 5.1 Objective Function
+### Three Data Tiers
 
-**Goal:** Minimize total cost while ensuring no subscriber exceeds their tier cap
+| Tier | Data Cap | Cost per User | When to Use |
+|------|----------|---------------|-------------|
+| **Tier 1** | 5 GB | $15/month | Light users (predicted < 4.5 GB) |
+| **Tier 2** | 10 GB | $25/month | Medium users (predicted 4.5-9 GB) |
+| **Tier 3** | 20 GB | $40/month | Heavy users (predicted > 9 GB) |
 
-```
-Minimize: Σ(tier_cost[i] × num_subscribers[i])
+### Assignment Logic
 
-Subject to:
-- predicted_usage[subscriber] ≤ tier_cap[assigned_tier] × (1 - safety_buffer)
-- safety_buffer = 10% (configurable)
-```
-
-### 5.2 Assignment Algorithm
-
-**Daily Optimization Process:**
-
-1. **For each subscriber:**
-   - Get current month prediction + confidence interval upper bound
-   - Calculate required capacity = predicted_usage + (confidence_upper - predicted_usage) × safety_factor
-   
-2. **Tier Selection:**
-   - Assign to lowest-cost tier where: `tier_cap ≥ required_capacity`
-   - If no tier fits, assign to highest tier + flag for manual review
-
-3. **Stability Rules:**
-   - Don't move subscriber if new tier cost difference < $2
-   - Max 1 tier move per subscriber per month
-   - Lock tier assignments 7 days before billing cycle end
-
-4. **Batch Optimization:**
-   - Re-run optimization daily
-   - Track cost savings vs. no-optimization baseline
-   - Log all tier changes with reason codes
-
-### 5.3 Cost Calculation
-
-**Monthly Cost:**
-```
-Total Cost = Σ(subscribers_in_tier[i] × tier_cost[i]) + overage_charges
-```
-
-**Overage Charges:**
-- If subscriber exceeds tier cap: `overage_gb × overage_cost_per_gb`
-- Track in `pool_optimization_log` table
-
----
-
-## 6. Donation Threshold Calculation
-
-### 6.1 Safe Donation Logic
-
-**Formula:**
-```
-Safe Donation Amount = Allocated Capacity - Predicted Usage - Confidence Buffer
-
-Where:
-- Allocated Capacity = tier_cap for subscriber's current tier
-- Predicted Usage = current_month_prediction
-- Confidence Buffer = (confidence_upper - predicted_usage) × safety_factor
-- safety_factor = 1.2 (20% buffer to prevent overages)
-```
+**Daily Process:**
+1. Get prediction for each customer (e.g., "will use 6.8 GB")
+2. Add safety buffer (10%): 6.8 × 1.1 = 7.48 GB needed
+3. Assign to cheapest tier that fits: Tier 2 (10 GB)
+4. Track cost savings vs. "everyone in Tier 3"
 
 **Example:**
-```
-Subscriber A:
-- Current Tier: 10 GB
-- Predicted Usage: 6.5 GB
-- Confidence Upper: 7.3 GB
-- Confidence Buffer: (7.3 - 6.5) × 1.2 = 0.96 GB
-- Safe Donation: 10 - 6.5 - 0.96 = 2.54 GB
-
-Display to user: "You can safely donate up to 2.5 GB this month"
-```
-
-### 6.2 Real-Time Updates
-
-**Update Frequency:** Daily (or when usage crosses thresholds)
-
-**Threshold Alerts:**
-- When safe donation drops below 1 GB → Update app UI
-- When safe donation reaches 0 → Disable donation option
-- When subscriber receives donation → Recalculate their safe amount
-
-### 6.3 Donation Mechanics
-
-**Business Rules:**
-1. Donations are cumulative per month
-2. Donors earn reward points (1 point per GB donated)
-3. Recipients are prioritized by need (closest to overage)
-4. Donations are non-refundable within billing cycle
+- 30,000 customers
+- Without optimization: All in Tier 3 = 30,000 × $40 = $1,200,000
+- With optimization: 
+  - 15,000 in Tier 1 = $225,000
+  - 10,000 in Tier 2 = $250,000
+  - 5,000 in Tier 3 = $200,000
+  - **Total: $675,000**
+  - **Savings: $525,000 (44%)**
 
 ---
 
-## 7. API Design
+## 🎁 Donation System
 
-### 7.1 Endpoint Specifications
+### How It Works
 
-#### **GET /api/usage/{msisdn}**
-Returns current month usage summary
+**Safe Donation Formula:**
+```
+Safe Amount = Tier Capacity - Predicted Usage - Safety Buffer
 
-**Response:**
-```json
-{
-  "msisdn": "2025551234",
-  "billing_month": "2026-01",
-  "usage": {
-    "voice_minutes": 145.5,
-    "sms_count": 287,
-    "data_gb": 6.34
-  },
-  "tier": {
-    "tier_id": 2,
-    "tier_name": "Tier 2 - Standard",
-    "data_cap_gb": 10.0
-  },
-  "days_remaining": 18,
-  "last_updated": "2026-01-30T10:15:00Z"
-}
+Example:
+- Customer has Tier 2 (10 GB)
+- Predicted to use: 6.5 GB
+- Safety buffer: 1.0 GB (90% confidence)
+- Safe to donate: 10 - 6.5 - 1.0 = 2.5 GB
 ```
 
-#### **GET /api/predictions/{msisdn}/current-month**
-Returns end-of-month prediction
+**In the App:**
+- "You can safely donate up to 2.5 GB"
+- Earn 2.5 reward points
+- Helps other customers avoid overages
+- Recalculated daily as usage changes
 
-**Response:**
-```json
-{
-  "msisdn": "2025551234",
-  "billing_month": "2026-01",
-  "prediction": {
-    "data_gb": 8.7,
-    "confidence_lower": 7.9,
-    "confidence_upper": 9.5
-  },
-  "risk_level": "low",
-  "will_exceed_tier": false,
-  "predicted_at": "2026-01-30T01:00:00Z"
-}
-```
-
-#### **GET /api/donations/{msisdn}/threshold**
-Returns safe donation amount
-
-**Response:**
-```json
-{
-  "msisdn": "2025551234",
-  "safe_donation_gb": 2.54,
-  "allocated_capacity_gb": 10.0,
-  "predicted_usage_gb": 6.5,
-  "confidence_buffer_gb": 0.96,
-  "calculated_at": "2026-01-30T01:00:00Z",
-  "can_donate": true
-}
-```
-
-#### **POST /api/donations**
-Records a data donation
-
-**Request:**
-```json
-{
-  "donor_msisdn": "2025551234",
-  "amount_gb": 2.0,
-  "recipient_msisdn": "2025555678"
-}
-```
-
-**Response:**
-```json
-{
-  "donation_id": 12345,
-  "status": "completed",
-  "reward_points": 2,
-  "new_safe_donation_gb": 0.54
-}
-```
-
-### 7.2 Authentication & Rate Limiting
-
-**Authentication:** API key-based (for Culture Wireless App)
-- Each request includes `X-API-Key` header
-- Keys stored in `api_keys` table with rate limits
-
-**Rate Limiting:**
-- 100 requests/minute per subscriber
-- 1000 requests/minute per API key
-- Burst allowance: 150 requests/10 seconds
+**What Happens:**
+1. Customer donates 2 GB
+2. Recipient gets 2 GB added to their account
+3. Donor gets 2 reward points
+4. Donor's new safe amount: 2.5 - 2.0 = 0.5 GB
+5. System tracks all donations for billing
 
 ---
 
-## 8. Scheduled Jobs
+## 🔒 Data Security
 
-### 8.1 Job Schedule
+### What We Protect
 
-| Job Name | Frequency | Time (EST) | Purpose |
-|----------|-----------|------------|---------|
-| **CDR/DSR Ingestion** | Every 15 mins | Continuous | Pull new files from SFTP |
-| **Daily Aggregation** | Daily | 12:30 AM | Update daily usage aggregates |
-| **Current Month Predictions** | Daily | 1:00 AM | Update all subscriber predictions |
-| **Next Month Predictions** | Daily | 1:30 AM | Update next month forecasts |
-| **Pool Optimization** | Daily | 2:00 AM | Recalculate optimal tier assignments |
-| **Donation Threshold Update** | Daily | 2:30 AM | Update safe donation amounts |
-| **Model Retraining** | Monthly | 1st of month, 3 AM | Retrain models with new data |
+**Sensitive Data:**
+- Customer phone numbers (MSISDN)
+- Usage patterns
+- Location data (cell tower IDs)
+- Personal information
 
-### 8.2 Job Dependencies
-
-```
-Ingestion (every 15 min)
-    ↓
-Daily Aggregation (12:30 AM)
-    ↓
-Current Month Predictions (1:00 AM)
-    ↓
-Next Month Predictions (1:30 AM)
-    ↓
-Pool Optimization (2:00 AM)
-    ↓
-Donation Threshold Update (2:30 AM)
-```
-
-### 8.3 Error Handling
-
-**Failure Scenarios:**
-- SFTP connection failure → Retry 3 times with exponential backoff
-- Database deadlock → Retry transaction
-- Model prediction failure → Use last known prediction + flag for manual review
-- API timeout → Return cached data with `stale: true` flag
-
-**Monitoring:**
-- All jobs log to `etl_runs` table
-- Failed jobs trigger email/Slack alerts
-- Dashboard shows job health and last run times
-
----
-
-## 9. Deployment Architecture
-
-### 9.1 Azure Services
-
-| Component | Azure Service | Configuration |
-|-----------|---------------|---------------|
-| **Database** | Azure Database for PostgreSQL (Flexible Server) | - TimescaleDB extension enabled<br>- 4 vCores, 16 GB RAM<br>- 128 GB SSD storage |
-| **API** | Azure Container Apps | - Python FastAPI container<br>- Auto-scale 1-5 instances<br>- Health checks enabled |
-| **Scheduled Jobs** | Azure Functions (Python) | - Consumption plan<br>- Timer triggers for each job<br>- App Insights logging |
-| **File Storage** | Azure Blob Storage | - Store historical CDR/DSR files<br>- Lifecycle policy: move to cool tier after 30 days |
-| **Monitoring** | Azure Monitor + App Insights | - Custom metrics dashboard<br>- Alerts on failures |
-
-### 9.2 Environment Separation
-
-**Development:**
-- Local PostgreSQL + TimescaleDB
-- Local Python environment
-- Sample data (1000 subscribers)
-
-**Staging:**
-- Azure PostgreSQL (smaller instance)
-- Subset of production data (5000 subscribers)
-- Full job scheduling
-
-**Production:**
-- Full Azure deployment
-- All 30-50K subscribers
-- High availability enabled
-
----
-
-## 10. Performance Targets
-
-### 10.1 System Performance
-
-| Metric | Target | Measurement |
-|--------|--------|-------------|
-| **API Response Time** | < 200ms (p95) | All GET endpoints |
-| **Prediction Latency** | < 1 second per subscriber | Batch prediction jobs |
-| **Ingestion Throughput** | 10,000 CDRs/second | 15-min ingestion window |
-| **Database Query Time** | < 50ms (p95) | User profile queries |
-
-### 10.2 Accuracy Targets
-
-| Model | Metric | Target |
-|-------|--------|--------|
-| **Current Month Predictor** | MAPE | < 15% |
-| **Next Month Predictor** | MAPE | < 20% |
-| **Pool Optimization** | Cost Savings | > 15% vs. no optimization |
-| **Overage Prevention** | False Positive Rate | < 5% |
-
-### 10.3 Scalability
-
-**Current Capacity (30-50K subscribers):**
-- Database: 100K+ reads/sec, 10K+ writes/sec
-- API: 500 requests/sec
-- Storage: 100 GB/month CDR data
-
-**Future Growth (500K subscribers):**
-- Scale database vertically (8 vCores, 32 GB RAM)
-- Scale API horizontally (10+ container instances)
-- Partition tables by subscriber hash
-
----
-
-## 11. Security & Compliance
-
-### 11.1 Data Security
-
-**Encryption:**
-- At rest: AES-256 encryption for database and blob storage
-- In transit: TLS 1.2+ for all API and database connections
-- SFTP: SSH key-based authentication
-
-**Access Control:**
-- Database: Role-based access (read-only for API, read-write for jobs)
-- API: API key authentication with rate limiting
-- Azure: Managed identities for service-to-service auth
-
-### 11.2 Data Privacy
-
-**PII Handling:**
-- MSISDN, IMSI are pseudonymized in logs
+**How We Protect:**
+- Encryption at rest (database)
+- Encryption in transit (HTTPS, SFTP)
+- Access controls (role-based)
+- Audit logs (who accessed what)
 - No storage of SMS content or call recordings
-- GDPR-compliant data retention policies
 
-**Audit Logging:**
-- All pool tier changes logged with reason
-- API access logs retained for 90 days
-- Database query audit trail
-
----
-
-## 12. Testing Strategy
-
-### 12.1 Unit Testing
-
-**Coverage Target:** > 80%
-
-**Key Test Areas:**
-- CDR/DSR parsers (handle malformed data)
-- Aggregation functions (correct calculations)
-- Model prediction functions (output validation)
-- Pool optimization logic (cost calculations)
-- API endpoints (input validation, error handling)
-
-### 12.2 Integration Testing
-
-**Test Scenarios:**
-- End-to-end: SFTP → Database → Predictions → API
-- Database triggers and functions
-- Job scheduling and dependencies
-- Error recovery and retry logic
-
-### 12.3 Load Testing
-
-**Targets:**
-- 1000 concurrent API requests
-- 100K CDR ingestion in 15 minutes
-- 50K subscriber predictions in 5 minutes
-
-**Tools:** Locust, pytest-benchmark
-
-### 12.4 Validation Testing
-
-**Data Quality:**
-- Validate CDR parsing accuracy (100% of required fields)
-- Check for data duplication
-- Verify aggregation math
-
-**Model Quality:**
-- Backtesting with historical data
-- A/B testing predictions vs. actuals
-- Monitor prediction drift
+**Compliance:**
+- GDPR-compliant data retention (delete on request)
+- PII pseudonymization in logs
+- 90-day retention for raw CDRs
+- Longer retention for aggregates (de-identified)
 
 ---
 
-## 13. Monitoring & Alerting
+## 📈 Performance Targets
 
-### 13.1 Metrics Dashboard
+### System Speed
 
-**System Health:**
-- API uptime, response times
-- Database connection pool status
-- Job success/failure rates
-- Data ingestion lag
+| Metric | Target | What It Means |
+|--------|--------|---------------|
+| **API Response** | < 200ms | Customer app loads fast |
+| **Prediction Update** | < 1 second/customer | Daily predictions finish quickly |
+| **File Ingestion** | < 5 minutes | Process 15-min file batch |
+| **Database Query** | < 50ms | App is responsive |
 
-**Business Metrics:**
-- Total subscribers, active subscribers
-- Pool tier distribution
-- Total donations, total overage charges
-- Cost savings from optimization
+### Accuracy Targets
 
-### 13.2 Alerts
-
-**Critical (Immediate):**
-- SFTP connection failed for 1+ hour
-- Database unavailable
-- API error rate > 5%
-- Model prediction failure
-
-**Warning (Daily Summary):**
-- Job took >2x expected time
-- Model MAPE > threshold
-- Unusual subscriber churn
+| Model | Target Accuracy | What It Means |
+|-------|----------------|---------------|
+| **Current Month** | Within 15% | If we predict 10 GB, actual is 8.5-11.5 GB |
+| **Next Month** | Within 20% | Longer horizon = wider range |
+| **Overage Prevention** | > 95% | Rarely assign tier that's too small |
 
 ---
 
-## 14. Documentation Deliverables
+## 🚀 Technology Stack
 
-### 14.1 Technical Documentation
+### Core Technologies
 
-✅ **Database Schema** (`mvno_schema.sql`)
-- All tables, indexes, triggers, functions documented
-
-✅ **API Specification** (`docs/api_specs.md`)
-- OpenAPI/Swagger documentation
-- Request/response examples
-
-✅ **Architecture Diagram** (This document)
-- System components and data flow
-
-### 14.2 Operational Documentation
-
-📝 **Deployment Guide** (`docs/deployment.md`)
-- Azure setup instructions
-- Environment configuration
-
-📝 **Runbooks** (`docs/runbooks.md`)
-- How to handle common issues
-- Job failure recovery
-
-📝 **Model Training Guide** (`docs/model_training.md`)
-- How to retrain models
-- Feature engineering steps
+| Component | Technology | Why We Chose It |
+|-----------|-----------|-----------------|
+| **Database** | PostgreSQL + TimescaleDB | Best for time-series data (CDRs) |
+| **Backend** | Python 3.9+ | Rich ML libraries, fast development |
+| **API** | FastAPI | High performance, auto-documentation |
+| **ML** | Prophet, XGBoost | Proven forecasting algorithms |
+| **Cloud** | Azure | Existing infrastructure |
+| **Scheduling** | Azure Functions | Serverless, cost-effective |
 
 ---
 
-## 15. Risks & Mitigation
+## 📝 Deliverables Checklist
 
-| Risk | Impact | Probability | Mitigation |
-|------|--------|-------------|------------|
-| **SFTP downtime** | High | Medium | Retry logic, alert after 1 hour, maintain local buffer |
-| **Model accuracy degradation** | Medium | Low | Daily monitoring, automated alerts, monthly retraining |
-| **Database performance** | High | Low | TimescaleDB partitioning, query optimization, caching |
-| **API overload** | Medium | Medium | Rate limiting, auto-scaling, CDN for static content |
-| **Data quality issues** | Medium | Medium | Validation checks, error logging, manual review queue |
+### Phase 1: Design (CURRENT - Milestone 1-2)
+- ✅ Database schema designed
+- ✅ Architecture documented
+- ✅ Data flow visualized
+- ✅ ML approach validated
+- ⏳ Awaiting client approval
 
----
+### Phase 2: Core Build (Milestone 3)
+- [ ] SFTP ingestion working
+- [ ] CDR/DSR parsers complete
+- [ ] Database populated with sample data
+- [ ] Daily aggregations working
 
-## 16. Success Criteria
+### Phase 3: ML & Optimization (Milestone 4)
+- [ ] All 3 prediction models trained
+- [ ] Pool optimizer operational
+- [ ] Donation calculator working
+- [ ] Accuracy validated
 
-### 16.1 Milestone 1-2 Acceptance (This Document)
-
-✅ Database schema approved
-✅ Architecture design approved
-✅ Model approach validated
-✅ API specifications confirmed
-
-### 16.2 Final System Acceptance
-
-- [ ] All 3 prediction models operational with MAPE < targets
-- [ ] Pool optimization saving > 15% vs. baseline
-- [ ] API uptime > 99.5%
-- [ ] Zero overage charges caused by incorrect predictions
-- [ ] Complete documentation delivered
-- [ ] Knowledge transfer completed
+### Phase 4: API & Deployment (Milestone 5)
+- [ ] REST API endpoints live
+- [ ] Azure deployment complete
+- [ ] Documentation finished
+- [ ] System tested and validated
 
 ---
 
-## 17. Timeline Confirmation
+## 🎯 Success Metrics
 
-**Total Duration:** 12-14 days
+### Business Goals
 
-- **Step 1-2 (Days 1-2):** Requirements + This Design Document ✅
-- **Step 3 (Days 3-5):** Core Build (Ingestion + Models)
-- **Step 4 (Days 6-9):** Optimization Engine
-- **Step 5 (Days 10-14):** Testing + Deployment
+1. **Cost Savings:** Save > 15% vs. no optimization
+2. **Customer Satisfaction:** < 1% overage incidents
+3. **System Reliability:** 99.5% uptime
+4. **Prediction Accuracy:** Within target ranges
 
-**Target Completion:** February 11-13, 2026
+### Technical Goals
+
+1. **Data Quality:** 100% of CDR files processed successfully
+2. **Performance:** All API calls < 200ms
+3. **Scalability:** Handle 50K users with room to grow
+4. **Maintainability:** Clear code, full documentation
 
 ---
 
-## Appendix A: Sample Data Structures
+## 📞 Questions & Next Steps
 
-### CDR Voice Record Example
-```csv
-206616,1,9182069189,3456789075436,VOICE_MO,HOME,2023-03-14 12:54:00,...
+### For Approval
+
+**Please confirm:**
+1. Billing cycle dates are correct (21st to 20th)
+2. Three-tier pool structure is accurate
+3. Data flow diagram makes sense to non-technical team
+4. Monthly file usage for reconciliation is clear
+
+### After Approval
+
+**We'll proceed to:**
+1. Set up Azure infrastructure
+2. Build SFTP ingestion pipeline
+3. Implement CDR/DSR parsers
+4. Load sample data for testing
+
+---
+
+## 📚 Additional Resources
+
+### Documentation Structure
+
+```
+docs/
+├── architecture.md          ← This document
+├── api_specifications.md    ← Detailed API docs
+├── deployment_guide.md      ← Azure setup instructions
+└── user_guide.md            ← How to use the system
 ```
 
-### DSR Record Example
-```csv
-"2023-09-13","2022100146","310240181838051","0","00000001","1","0","0","4","229625731.000",...
-```
+### Support
+
+**For questions about:**
+- Technical architecture → Henry Dibie
+- Business requirements → Account Manager
+- Billing cycle details → Culture Wireless Operations
 
 ---
 
-## Appendix B: Configuration Parameters
+**Document Status:** Ready for Client Review  
+**Version:** 1.1 (Updated with billing cycle information)  
+**Last Updated:** January 30, 2026
 
-```env
-# Tier Configuration
-TIER_1_CAP_GB=5.0
-TIER_1_COST=15.00
-TIER_2_CAP_GB=10.0
-TIER_2_COST=25.00
-TIER_3_CAP_GB=20.0
-TIER_3_COST=40.00
-
-# Prediction Settings
-CONFIDENCE_LEVEL=0.90
-DONATION_SAFETY_BUFFER=0.10
-OVERAGE_ALERT_THRESHOLD=0.90
-
-# Performance
-MAX_WORKERS=4
-BATCH_SIZE=1000
-CACHE_TTL_SECONDS=300
-```
-
----
-
-**Document Status:** APPROVED FOR IMPLEMENTATION  
-**Next Steps:** Proceed to Step 3 (Core Build) upon client approval
+**Next Step:** Client approval to proceed to Milestone 3 (Core Build)
