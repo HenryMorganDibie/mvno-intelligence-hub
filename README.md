@@ -246,7 +246,7 @@ Proprietary - Culture Wireless Group
 
 ## 📞 Support
 
-For issues or questions, contact: [your-email@example.com]
+For issues or questions, contact: 
 
 ## 🗂️ Project Structure
 
