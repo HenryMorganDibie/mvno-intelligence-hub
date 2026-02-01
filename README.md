@@ -279,7 +279,7 @@ mvno-usage-prediction/
 
 - [x] Step 1: Requirements & Data Review
 - [x] Step 2: Technical Design & Schema
-- [x] Step 3: Core Build (Phase 1: Ingestion & Parsing) ⬅️ UPDATE THIS
+- [x] Step 3: Core Build (Phase 1: Ingestion & Parsing)
 - [ ] Step 3: Core Build (Phase 2: Forecasting Models)
 - [ ] Step 4: Optimization Engine
 - [ ] Step 5: Testing & Deployment
