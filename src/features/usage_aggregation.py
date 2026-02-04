@@ -1,23 +1,19 @@
 """
 Usage Aggregation Module
-Calculates daily and monthly usage totals per subscriber
+Calculates daily and monthly usage totals per subscriber.
+Production-ready: Uses centralized logging, database, and settings.
 """
 
-import os
 from datetime import datetime, timedelta
-from sqlalchemy import text, func
-from dotenv import load_dotenv
+from sqlalchemy import text
 import logging
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Load environment variables
-load_dotenv()
-
-# Import database connection from config
+# 1. Professional Imports - No more hardcoded logging or env loads here
+from config.logging_config import setup_logging
 from config.database import engine
+
+# Initialize professional logger
+logger = setup_logging(__name__)
 
 def aggregate_daily_usage(msisdn, usage_date):
     """Calculate total usage for a subscriber on a specific day"""
@@ -64,7 +60,7 @@ def aggregate_daily_usage(msisdn, usage_date):
     return None
 
 def aggregate_monthly_usage(msisdn, billing_month):
-    """Calculate month-to-date usage for a subscriber (Fixes AmbiguousColumn error)"""
+    """Calculate month-to-date usage for a subscriber"""
     billing_start = datetime.strptime(billing_month, '%Y-%m-%d')
     if billing_start.day != 21:
         billing_start = billing_start.replace(day=21)
@@ -74,7 +70,6 @@ def aggregate_monthly_usage(msisdn, billing_month):
     else:
         billing_end = billing_start.replace(month=billing_start.month + 1, day=20)
 
-    # Note: specified 'data.effective_date' to avoid ambiguity
     query = text("""
         SELECT 
             :msisdn as msisdn,
@@ -151,7 +146,7 @@ def calculate_usage_velocity(msisdn, days=7):
     return None
 
 def populate_daily_aggregates(start_date=None, end_date=None):
-    """Populates usage_daily_agg. Fixed for UNION duplicate handling."""
+    """Populates usage_daily_agg with multi-event handling and ON CONFLICT logic"""
     if not start_date: start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
     if not end_date: end_date = datetime.now().strftime('%Y-%m-%d')
     
@@ -187,6 +182,9 @@ def populate_daily_aggregates(start_date=None, end_date=None):
             voice_minutes = EXCLUDED.voice_minutes,
             sms_count = EXCLUDED.sms_count,
             data_bytes = EXCLUDED.data_bytes,
+            voice_events = EXCLUDED.voice_events,
+            sms_events = EXCLUDED.sms_events,
+            data_sessions = EXCLUDED.data_sessions,
             updated_at = NOW()
     """)
     
@@ -206,6 +204,7 @@ def get_current_billing_cycle_dates():
         billing_end = today.replace(day=20)
     else:
         billing_start = today.replace(day=21)
+        # Advance to next month's 20th
         next_month = (today.replace(day=28) + timedelta(days=4)).replace(day=20)
         billing_end = next_month
     return billing_start, billing_end
@@ -225,20 +224,19 @@ def get_subscriber_usage_summary(msisdn):
     return None
 
 if __name__ == "__main__":
+    # Test block
     test_msisdn = "2026853028"
-    print("Testing Usage Aggregation Functions\n" + "="*50)
+    logger.info("Starting Usage Aggregation Test Run")
     
-    # Pre-populate data so Velocity works
+    # 1. Populate tables
     populate_daily_aggregates("2026-01-01", "2026-02-10")
     
-    daily = aggregate_daily_usage(test_msisdn, "2026-02-01")
-    if daily: print(f"1. Daily Usage: {daily['voice_minutes']} min, {daily['data_bytes']/1e9:.2f} GB")
-    
-    monthly = aggregate_monthly_usage(test_msisdn, "2026-01-21")
-    if monthly: print(f"2. Monthly Usage: {monthly['data_gb']:.2f} GB MTD")
-    
-    velocity = calculate_usage_velocity(test_msisdn)
-    if velocity: print(f"3. Velocity: {velocity['avg_data_gb_per_day']:.2f} GB/day")
-    
+    # 2. Test functions
     summary = get_subscriber_usage_summary(test_msisdn)
-    if summary: print(f"4. Summary: Cycle ends {summary['billing_cycle']['end']}")
+    if summary:
+        print("\n" + "="*50)
+        print(f"PIPELINE TEST RESULTS FOR {test_msisdn}")
+        print(f"Billing Cycle: {summary['billing_cycle']['start']} to {summary['billing_cycle']['end']}")
+        print(f"MTD Usage:     {summary['usage_mtd']['data_gb']:.2f} GB")
+        print(f"Daily Velocity: {summary['velocity']['avg_gb_day']:.4f} GB/day")
+        print("="*50 + "\n")

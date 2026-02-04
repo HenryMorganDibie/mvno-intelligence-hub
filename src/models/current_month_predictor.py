@@ -1,6 +1,7 @@
 """
 Current Month Usage Predictor
-Predicts total usage by end of current billing cycle using Prophet
+Predicts total usage by end of current billing cycle using Prophet.
+Production-ready: Uses centralized logging, database, and env settings.
 """
 
 import os
@@ -9,15 +10,19 @@ import numpy as np
 from datetime import datetime, timedelta
 from prophet import Prophet
 from sqlalchemy import text
-import logging
 import pickle
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Import database connection
+# 1. Professional Imports
+from config.logging_config import setup_logging
 from config.database import engine
+
+# Initialize professional logger
+logger = setup_logging(__name__)
+
+# 2. Silence Prophet/CmdStanPy noise for a clean production output
+import logging
+logging.getLogger('prophet').setLevel(logging.ERROR)
+logging.getLogger('cmdstanpy').setLevel(logging.ERROR)
 
 class CurrentMonthPredictor:
     """
@@ -25,12 +30,14 @@ class CurrentMonthPredictor:
     Uses Prophet for time-series forecasting
     """
     
-    def __init__(self, model_path='models/current_month_prophet.pkl'):
+    def __init__(self, msisdn, model_dir='models'):
         self.model = None
-        self.model_path = model_path
-        self.confidence_level = 0.90  # 90% confidence interval
+        self.msisdn = msisdn
+        self.model_path = os.path.join(model_dir, f'{msisdn}_prophet.pkl')
+        self.confidence_level = 0.90  # Matches .env CONFIDENCE_LEVEL
         
-    def prepare_training_data(self, msisdn, lookback_months=3):
+    def prepare_training_data(self, lookback_months=3):
+        """Fetch historical usage from daily aggregates"""
         end_date = datetime.now().date()
         start_date = end_date - timedelta(days=lookback_months * 30)
         
@@ -48,13 +55,13 @@ class CurrentMonthPredictor:
         try:
             with engine.connect() as conn:
                 df = pd.read_sql(query, conn, params={
-                    'msisdn': msisdn,
+                    'msisdn': self.msisdn,
                     'start_date': start_date,
                     'end_date': end_date
                 })
                 
                 if df.empty:
-                    logger.warning(f"No historical data found for {msisdn}")
+                    logger.warning(f"No historical data found for {self.msisdn}")
                     return None
                 
                 df['ds'] = pd.to_datetime(df['ds'])
@@ -64,19 +71,19 @@ class CurrentMonthPredictor:
                 df_complete = pd.DataFrame({'ds': date_range})
                 df = df_complete.merge(df, on='ds', how='left').fillna(0)
                 
-                logger.info(f"Prepared {len(df)} days of training data for {msisdn}")
+                logger.info(f"Prepared {len(df)} days of training data for {self.msisdn}")
                 return df
                 
         except Exception as e:
-            logger.error(f"Error preparing training data for {msisdn}: {e}")
+            logger.error(f"Error preparing training data for {self.msisdn}: {e}")
             return None
     
-    def train(self, msisdn, lookback_months=3):
-        df = self.prepare_training_data(msisdn, lookback_months)
+    def train(self, lookback_months=3):
+        """Train Prophet model on subscriber history"""
+        df = self.prepare_training_data(lookback_months)
         
-        # Prophet requires at least 2 non-NaN rows to establish a trend
         if df is None or len(df) < 2:
-            logger.warning(f"Insufficient data to train model for {msisdn} (minimum 2 days required)")
+            logger.warning(f"Insufficient data for {self.msisdn} (minimum 2 days required)")
             return False
         
         try:
@@ -92,30 +99,29 @@ class CurrentMonthPredictor:
             )
             
             self.model.fit(df)
-            logger.info(f"Successfully trained model for {msisdn}")
+            logger.info(f"Successfully trained model for {self.msisdn}")
             return True
             
         except Exception as e:
-            logger.error(f"Error training model for {msisdn}: {e}")
+            logger.error(f"Error training model for {self.msisdn}: {e}")
             return False
     
-    def predict_month_end(self, msisdn, current_usage_gb, days_remaining):
+    def predict_month_end(self, current_usage_gb, days_remaining):
+        """Generate forecast for the remainder of the billing cycle"""
         if self.model is None:
-            logger.error("Model not trained. Call train() first.")
+            logger.error(f"Model not trained for {self.msisdn}")
             return None
         
-        # If it's the last day of the cycle, prediction is just current usage
         if days_remaining <= 0:
-            return self._zero_days_result(msisdn, current_usage_gb)
+            return self._zero_days_result(current_usage_gb)
 
-        # Create future dataframe for remaining days
         future = self.model.make_future_dataframe(periods=days_remaining, freq='D')
         
         try:
             forecast = self.model.predict(future)
             remaining_predictions = forecast.tail(days_remaining)
             
-            # Sum predicted usage for remaining days (ensure no negative daily values)
+            # Sum predicted usage for remaining days
             predicted_additional_gb = max(0, remaining_predictions['yhat'].sum())
             predicted_total_gb = current_usage_gb + predicted_additional_gb
             
@@ -124,29 +130,27 @@ class CurrentMonthPredictor:
             predicted_additional_upper = max(0, remaining_predictions['yhat_upper'].sum())
             
             result = {
-                'msisdn': msisdn,
+                'msisdn': self.msisdn,
                 'current_usage_gb': round(current_usage_gb, 2),
                 'predicted_total_gb': round(predicted_total_gb, 2),
                 'predicted_additional_gb': round(predicted_additional_gb, 2),
                 'confidence_lower_gb': round(current_usage_gb + predicted_additional_lower, 2),
                 'confidence_upper_gb': round(current_usage_gb + predicted_additional_upper, 2),
-                'confidence_level': self.confidence_level,
                 'days_remaining': days_remaining,
                 'predicted_at': datetime.now().isoformat()
             }
             return result
             
         except Exception as e:
-            logger.error(f"Error making prediction for {msisdn}: {e}")
+            logger.error(f"Error making prediction for {self.msisdn}: {e}")
             return None
 
-    def _zero_days_result(self, msisdn, usage):
+    def _zero_days_result(self, usage):
         return {
-            'msisdn': msisdn, 'current_usage_gb': round(usage, 2),
+            'msisdn': self.msisdn, 'current_usage_gb': round(usage, 2),
             'predicted_total_gb': round(usage, 2), 'predicted_additional_gb': 0.0,
             'confidence_lower_gb': round(usage, 2), 'confidence_upper_gb': round(usage, 2),
-            'confidence_level': self.confidence_level, 'days_remaining': 0,
-            'predicted_at': datetime.now().isoformat()
+            'days_remaining': 0, 'predicted_at': datetime.now().isoformat()
         }
 
     def save_model(self):
@@ -157,7 +161,7 @@ class CurrentMonthPredictor:
                 pickle.dump(self.model, f)
             return True
         except Exception as e:
-            logger.error(f"Error saving model: {e}")
+            logger.error(f"Error saving model for {self.msisdn}: {e}")
             return False
 
     def load_model(self):
@@ -167,37 +171,32 @@ class CurrentMonthPredictor:
                 self.model = pickle.load(f)
             return True
         except Exception as e:
-            logger.error(f"Error loading model: {e}")
+            logger.error(f"Error loading model for {self.msisdn}: {e}")
             return False
 
-
 def predict_for_subscriber(msisdn, retrain=False):
+    """Wrapper to handle the full prediction workflow for a single MSISDN"""
     from src.features.usage_aggregation import get_subscriber_usage_summary
     
     summary = get_subscriber_usage_summary(msisdn)
     if not summary:
-        logger.error(f"Could not get usage summary for {msisdn}")
         return None
     
     current_usage_gb = summary['usage_mtd']['data_gb']
+    cycle_end = datetime.strptime(summary['billing_cycle']['end'], '%Y-%m-%d').date()
+    days_remaining = max(0, (cycle_end - datetime.now().date()).days)
     
-    # FIX: Calculate days_remaining from the cycle end date
-    cycle_end_str = summary['billing_cycle']['end']
-    cycle_end = datetime.strptime(cycle_end_str, '%Y-%m-%d').date()
-    today = datetime.now().date()
-    days_remaining = max(0, (cycle_end - today).days)
-    
-    predictor = CurrentMonthPredictor(model_path=f'models/{msisdn}_current_month.pkl')
+    predictor = CurrentMonthPredictor(msisdn)
     
     if retrain or not predictor.load_model():
-        if not predictor.train(msisdn, lookback_months=3):
+        if not predictor.train(lookback_months=3):
             return None
         predictor.save_model()
     
-    return predictor.predict_month_end(msisdn, current_usage_gb, days_remaining)
-
+    return predictor.predict_month_end(current_usage_gb, days_remaining)
 
 def save_prediction_to_db(prediction):
+    """Saves result to predictions_current_month with upsert logic"""
     if not prediction: return False
     
     query = text("""
@@ -217,7 +216,7 @@ def save_prediction_to_db(prediction):
             confidence_upper_gb = EXCLUDED.confidence_upper_gb,
             days_remaining = EXCLUDED.days_remaining,
             current_usage_gb = EXCLUDED.current_usage_gb,
-            created_at = NOW()
+            updated_at = NOW()
     """)
     
     from src.features.usage_aggregation import get_current_billing_cycle_dates
@@ -227,9 +226,8 @@ def save_prediction_to_db(prediction):
         with engine.begin() as conn:
             conn.execute(query, {
                 'msisdn': prediction['msisdn'],
-                'billing_month': prediction['billing_month'] if 'billing_month' in prediction else billing_start.strftime('%Y-%m-%d'),
+                'billing_month': billing_start.strftime('%Y-%m-%d'),
                 'prediction_date': datetime.now().date(),
-                # FIX: Explicitly cast NumPy types to Python floats/ints
                 'predicted_data_gb': float(prediction['predicted_total_gb']),
                 'confidence_lower_gb': float(prediction['confidence_lower_gb']),
                 'confidence_upper_gb': float(prediction['confidence_upper_gb']),
@@ -240,24 +238,20 @@ def save_prediction_to_db(prediction):
         logger.info(f"Saved prediction for {prediction['msisdn']} to database")
         return True
     except Exception as e:
-        logger.error(f"Error saving prediction to database: {e}")
+        logger.error(f"Error saving prediction for {prediction['msisdn']}: {e}")
         return False
 
 if __name__ == "__main__":
-    print("Testing Current Month Predictor\n" + "=" * 50)
     test_msisdn = "2026853028"
-    prediction = predict_for_subscriber(test_msisdn, retrain=True)
+    logger.info(f"Running Current Month Predictor Test for {test_msisdn}")
     
-    if prediction:
-        print("\n✅ Prediction Results:")
-        print(f"   Current Usage: {prediction['current_usage_gb']} GB")
-        print(f"   Predicted Total: {prediction['predicted_total_gb']} GB")
-        print(f"   Additional Usage: {prediction['predicted_additional_gb']} GB")
-        print(f"   Confidence Range: {prediction['confidence_lower_gb']} - {prediction['confidence_upper_gb']} GB")
-        print(f"   Days Remaining: {prediction['days_remaining']}")
-        
-        if save_prediction_to_db(prediction):
-            print("\n✅ Prediction saved to database")
-    else:
-        print("\n❌ Prediction failed (Hint: Ensure DB has at least 2 days of data for this MSISDN)")
-    print("\n" + "=" * 50)
+    result = predict_for_subscriber(test_msisdn, retrain=True)
+    
+    if result:
+        print("\n" + "="*50)
+        print(f"PREDICTION RESULTS: {test_msisdn}")
+        print(f"Expected Usage: {result['predicted_total_gb']:.2f} GB")
+        print(f"Confidence Upper: {result['confidence_upper_gb']:.2f} GB")
+        print(f"Days Left: {result['days_remaining']}")
+        print("="*50 + "\n")
+        save_prediction_to_db(result)
