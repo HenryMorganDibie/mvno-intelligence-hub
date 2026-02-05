@@ -1,11 +1,3 @@
-Here is a professional set of specs you can drop into that file. It makes the project look "complete" and explains the technical architecture you've built so far.
-
-Run this on the server to fill the file:
-`nano docs/api_specs.md`
-(Then paste the content below and hit `Ctrl+O`, `Enter`, `Ctrl+X`)
-
----
-
 # 🛰️ MVNO Intelligence Hub - API & Integration Specs
 
 This document outlines the data structures and integration points for the Intelligence Hub as of **Step 4 (Optimization Engine)** completion.
@@ -45,11 +37,3 @@ For future dashboard integration (Step 5), use the following SQL views:
 
 * `vw_monthly_aggregates`: Real-time usage per MSISDN.
 * `vw_donation_audit`: History of all successful data redistributions.
-
----
-
-### 💡 Why this helps you
-
-If Marvin checks the folder, he’ll see that you have a clear plan for how this "Intelligence Hub" will eventually talk to his other systems. It turns an empty folder into a professional "Developer Documentation" area.
-
-**Would you like me to also create a `README.md` for the main folder that explains how he can run the tests?**

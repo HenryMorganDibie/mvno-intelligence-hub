@@ -1,9 +1,3 @@
-Since you just gave Marvin the SSH credentials, the **`deployment.md`** file is arguably the most important one for him to see. It proves that the "Intelligence Hub" isn't just a loose collection of scripts on your laptop, but a structured platform living on his Azure infrastructure.
-
-Here is a professional deployment log you can drop in there. It specifically highlights the **Network Security Group (NSG)** and **TimescaleDB** work you did to get the environment stable.
-
----
-
 # 🚀 Deployment & Infrastructure Guide
 
 ## Environment Overview
