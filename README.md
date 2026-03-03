@@ -81,6 +81,7 @@ python3 -m tests.load_test
 
 | Time | Job | Purpose |
 |------|-----|---------|
+| Every 15 mins | `sftp_puller.py` | Pulls new CDR/DSR files from carrier SFTP and ingests them |
 | 12:05 AM | `main.py` | Full pipeline: aggregate → predict → match → report |
 | 12:30 AM | `health_check.py` | 7-point system validation, alerts to `logs/health.log` |
 
