@@ -121,7 +121,7 @@ def save_pool_assignment_to_db(msisdn, assignment, previous_tier_id=None):
             conn.execute(query, {
                 'msisdn': msisdn,
                 'tier_id': assignment['tier_id'],
-                'billing_month': billing_start.strftime('%Y-%m-%d'),
+                'billing_month': billing_start.strftime('%Y-%m'),
                 'reason': assignment['reason'],
                 'previous_tier_id': previous_tier_id
             })
@@ -197,7 +197,7 @@ def save_optimization_log(summary):
     try:
         with engine.begin() as conn:
             conn.execute(query, {
-                'billing_month': billing_start.strftime('%Y-%m-%d'),
+                'billing_month': billing_start.strftime('%Y-%m'),
                 'total_subscribers': summary['total_subscribers'],
                 'tier_distribution': json.dumps(summary['tier_distribution']),
                 'total_cost': summary['total_cost'],

@@ -1,39 +1,175 @@
-# 🚀 Deployment & Infrastructure Guide
+# Deployment & Operations Guide
 
-## Environment Overview
+**Project:** MVNO Intelligence Hub  
+**Client:** Culture Wireless Group  
+**Last Updated:** March 3, 2026
 
-* **Cloud Provider:** Azure
-* **Host:** `20.106.102.183` (Standard D-Series VM)
-* **OS:** Ubuntu 22.04 LTS
-* **Database:** PostgreSQL 15 + TimescaleDB (Optimized for time-series usage data)
+---
 
-## Infrastructure Configuration (Completed Step 2)
+## Infrastructure
 
-1. **Network Security Groups (NSG):** * Port 22 (SSH) restricted for management.
-* Port 5432 (PostgreSQL) locked to internal VNET traffic for security.
+| Component | Details |
+|-----------|---------|
+| Cloud Provider | Microsoft Azure |
+| VM IP | 20.106.102.183 |
+| OS | Ubuntu 24.04 LTS |
+| User | azurecwg |
+| Database | PostgreSQL 10.23 |
+| DB Name | mvno_usage_db |
+| DB User | postgres |
+| Python | 3.10 |
+| SFTP Host | cdr.mvnoc.ai:10022 |
+| SFTP User | culturewireless |
 
+---
 
-2. **Database Hardening:**
-* Configured `pg_hba.conf` to allow secure local socket connections for the Python engine.
-* Initialized `mvno_usage_db` with relational constraints to prevent data corruption.
+## Initial Setup
+```bash
+# SSH into server
+ssh azurecwg@20.106.102.183
 
+# Navigate to project
+cd /home/azurecwg/mvno-intelligence-hub
 
+# Activate virtual environment
+source venv/bin/activate
 
-## Software Stack
+# Verify database
+psql -U postgres -d mvno_usage_db -h localhost -c "SELECT COUNT(*) FROM subscribers;"
+```
 
-* **Language:** Python 3.10
-* **ML Engine:** Stan / CmdStanPy (Bayesian Inference)
-* **Dependency Management:** Python Virtual Environment (`venv`)
+---
 
-## Running the Deployment
+## Running the Pipeline
 
-To execute a manual deployment sync and run the intelligence pipeline:
+### Manual Run
+```bash
+cd /home/azurecwg/mvno-intelligence-hub
+source venv/bin/activate
+python3 main.py
+```
 
-1. **Activate Env:** `source venv/bin/activate`
-2. **Verify DB:** `sudo systemctl status postgresql`
-3. **Run Pipeline:** `PYTHONPATH=. python -m main`
+### Manual Health Check
+```bash
+python3 -m src.monitoring.health_check
+```
 
-## Maintenance Notes
+### Manual Load Test
+```bash
+python3 -m tests.load_test
+```
 
-* **Logs:** System logs are directed to the standard output and can be piped to `/logs` for audit trails.
-* **Storage:** TimescaleDB "hypertables" automatically handle data partitioning to ensure the VM storage doesn't hit a bottleneck as CDR volume grows.
+---
+
+## Automated Schedule (Cron)
+```
+5 0 * * *  python3 main.py >> cron_log.log 2>&1
+30 0 * * *  python3 -m src.monitoring.health_check >> logs/health.log 2>&1
+```
+
+View current crontab:
+```bash
+crontab -l
+```
+
+---
+
+## Log Files
+
+| Log | Location | Purpose |
+|-----|----------|---------|
+| Pipeline | `cron_log.log` | Nightly main.py output |
+| Health | `logs/health.log` | Nightly health check output |
+| Alerts | `logs/health_alerts.log` | Critical failures only |
+
+Check for alerts:
+```bash
+cat logs/health_alerts.log
+tail -50 logs/health.log
+tail -50 cron_log.log
+```
+
+---
+
+## Database Quick Reference
+```bash
+# Connect to database
+psql -U postgres -d mvno_usage_db -h localhost
+
+# Key table row counts
+SELECT COUNT(*) FROM daily_subscriber_reports;
+SELECT COUNT(*) FROM daily_usage;
+SELECT COUNT(*) FROM usage_daily_agg;
+SELECT COUNT(*) FROM predictions_current_month;
+SELECT COUNT(*) FROM data_donations;
+
+# Check latest predictions
+SELECT msisdn, predicted_data_gb, confidence_upper_gb, current_usage_gb, days_remaining
+FROM predictions_current_month
+WHERE prediction_date = CURRENT_DATE;
+
+# Check latest donations
+SELECT * FROM data_donations
+WHERE transaction_date::date = CURRENT_DATE;
+```
+
+---
+
+## Common Issues & Fixes
+
+### Pipeline crashes with NoneType error
+**Cause:** `predictions_current_month` has stale records with NULL fields  
+**Fix:**
+```bash
+psql -U postgres -d mvno_usage_db -h localhost -c "DELETE FROM predictions_current_month;"
+python3 main.py
+```
+
+### Donation calculator warning: Insufficient data
+**Cause:** `billing_month` format mismatch between tables  
+**Fix:** Verify all tables use `YYYY-MM` format:
+```bash
+psql -U postgres -d mvno_usage_db -h localhost -c "SELECT DISTINCT billing_month FROM pool_assignments;"
+psql -U postgres -d mvno_usage_db -h localhost -c "SELECT DISTINCT billing_month FROM predictions_current_month;"
+```
+
+### Impact report numbers keep growing
+**Cause:** `data_donations` not being deduplicated  
+**Fix:** Already resolved — donation_matcher.py checks for existing matches before inserting.
+
+### SFTP connection refused
+**Cause:** Azure NSG blocking port 10022 or carrier IP whitelist  
+**Fix:** Verify NSG rules allow outbound on port 10022, confirm carrier has whitelisted VM IP.
+
+---
+
+## Updating the Codebase
+```bash
+cd /home/azurecwg/mvno-intelligence-hub
+git pull
+source venv/bin/activate
+pip install -r requirements.txt
+python3 main.py
+```
+
+---
+
+## Architecture Summary
+```
+cdr.mvnoc.ai:10022 (SFTP)
+    ↓
+daily_usage + daily_subscriber_reports (PostgreSQL)
+    ↓
+usage_aggregation.py → usage_daily_agg
+    ↓
+current_month_predictor.py → predictions_current_month
+    ↓
+pool_optimizer.py → pool_assignments
+donation_calculator.py → donation_thresholds
+    ↓
+donation_matcher.py → data_donations
+    ↓
+impact_summary.py → Community Impact Report
+    ↓
+health_check.py → logs/health_alerts.log
+```

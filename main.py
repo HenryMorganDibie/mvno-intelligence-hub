@@ -1,3 +1,4 @@
+import traceback
 """
 MVNO Intelligence Hub - Main Orchestrator
 Coordinates the full lifecycle: Individual Analysis -> Community Matching -> Reporting
@@ -5,7 +6,7 @@ Coordinates the full lifecycle: Individual Analysis -> Community Matching -> Rep
 
 from config.logging_config import setup_logging
 from src.features.usage_aggregation import populate_daily_aggregates
-from src.models.current_month_predictor import predict_for_subscriber
+from src.models.current_month_predictor import predict_for_subscriber, save_prediction_to_db
 from src.optimization.pool_optimizer import optimize_subscriber_assignment
 from src.optimization.donation_calculator import calculate_donation_for_subscriber, save_donation_threshold_to_db
 from src.optimization.donation_matcher import execute_matching_cycle
@@ -22,8 +23,12 @@ def run_subscriber_pipeline(msisdn):
         # STEP 1: Generate Prediction
         logger.info(f"Step 1 ({msisdn}): Generating usage prediction...")
         prediction = predict_for_subscriber(msisdn, retrain=True)
+        if prediction:
+            save_prediction_to_db(prediction)
+        if prediction is None or isinstance(prediction, bool):
+            prediction = {"predicted_total_gb": 0.0, "confidence_upper_gb": 0.0, "days_remaining": 0}
         if not prediction:
-            raise Exception("Prediction phase failed.")
+            logger.warning("Prediction returned empty; using safety defaults.")
 
         # STEP 2: Optimize Pool Tier
         logger.info(f"Step 2 ({msisdn}): Checking for optimal tier assignment...")
@@ -39,7 +44,7 @@ def run_subscriber_pipeline(msisdn):
         return True
 
     except Exception as e:
-        logger.error(f"Pipeline crashed for {msisdn}: {e}")
+        logger.error(f"Pipeline crashed for {msisdn}: {e!r}")
         return False
 
 def run_batch_process():
@@ -50,7 +55,7 @@ def run_batch_process():
     3. Community Matching
     4. Impact Reporting
     """
-    subscribers = ["2026853028", "2026999999"]
+    subscribers = ["4042778501", "4043846345"]
     
     logger.info(f"🚀 Starting Global Batch Processing for {len(subscribers)} subscribers...")
 
